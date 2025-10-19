@@ -1,0 +1,380 @@
+from motor import motor_asyncio
+import os
+import asyncio
+from typing import Dict, List, Any, Optional
+from datetime import datetime
+import discord
+from .permission_responses import PermissionResponses
+from .permission_manager import PermissionManager
+from .permission_result import PermissionResult
+
+class MongoManager:
+    def __init__(self):
+        """Initialize MongoDB connection and setup collections"""
+        try:
+            self._load_env_variables()
+            self.client = motor_asyncio.AsyncIOMotorClient(os.getenv('MONGO_URI'))
+            self.db = self.client[os.getenv('MONGO_DB_NAME')]
+            self.permissions = PermissionManager(self.db)
+            
+            # Initialize collections on startup
+            asyncio.create_task(self._initialize_collections())
+            
+        except Exception as e:
+            print(f"Failed to initialize MongoDB: {str(e)}")
+            raise
+
+    def _load_env_variables(self):
+        """Load and validate required environment variables"""
+        required_vars = {
+            'MONGO_URI': 'MongoDB connection URI',
+            'MONGO_DB_NAME': 'Database name',
+            'BOT_OWNER_ID': 'Bot owner Discord ID'
+        }
+        
+        missing_vars = []
+        for var, description in required_vars.items():
+            if not os.getenv(var):
+                missing_vars.append(f"{var} ({description})")
+        
+        if missing_vars:
+            raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
+
+    async def _initialize_collections(self):
+        """Initialize collections with proper schemas and indexes"""
+        try:
+            # Define all collections and their indexes
+            collections_config = {
+                'tickets': [
+                    [("ticket_type", 1), ("status", 1)],
+                    [("guild_id", 1)]
+                ],
+                'dashboard_permissions': [
+                    [("dashboard_name", 1), ("guild_id", 1), ("user_id", 1)],
+                    [("role_id", 1)]
+                ],
+                'command_permissions': [
+                    [("command_name", 1), ("guild_id", 1), ("user_id", 1)],
+                    [("role_id", 1)]
+                ],
+                'clans': [
+                    [("name", 1), ("guild_id", 1)],
+                    [("guild_id", 1)]
+                ],
+                'counting_channels': [
+                    [("channel_id", 1), ("guild_id", 1)],
+                    [("enabled", 1)]
+                ],
+                'ticket_config': [
+                    [("ticket_type", 1), ("guild_id", 1)]
+                ],
+                'ticket_staff': [
+                    [("ticket_type", 1), ("guild_id", 1)],
+                    [("user_id", 1), ("role_id", 1)]
+                ],
+                'panel_images': [
+                    [("panel_type", 1), ("guild_id", 1)]
+                ],
+                'panel_channels': [
+                    [("panel_type", 1), ("guild_id", 1)]
+                ]
+            }
+
+            # Create collections and indexes
+            for collection_name, indexes in collections_config.items():
+                collection = self.db[collection_name]
+                for index in indexes:
+                    await collection.create_index(index)
+
+            print("MongoDB collections and indexes initialized successfully")
+            
+            # List all collections
+            collections = await self.db.list_collection_names()
+            print(f"Available collections: {', '.join(collections)}")
+            
+        except Exception as e:
+            print(f"Error initializing collections: {str(e)}")
+
+    async def check_dashboard_permission(self, dashboard_name: str, user_id: int, user_roles: List[int], guild_id: int) -> bool:
+        """Check if user has permission to use a dashboard"""
+        try:
+
+            # Check if user is bot owner
+            if str(user_id) == os.getenv('BOT_OWNER_ID'):
+                return True
+
+            # Check administrator permission
+            if user.guild_permissions.administrator:
+                return True
+
+            # Get dashboard permissions
+            permissions = await self.db.dashboard_permissions.find_one({
+                'dashboard_name': dashboard_name,
+                'guild_id': guild_id
+            })
+
+            # If no permissions set, deny access
+            if not permissions:
+                return False
+
+            # Check user direct permission
+            user_perm = await self.db.dashboard_permissions.find_one({
+                'dashboard_name': dashboard_name,
+                'user_id': user_id,
+                'guild_id': guild_id
+            })
+            if user_perm:
+                return True
+
+            # Check role permissions
+            role_perm = await self.db.dashboard_permissions.find_one({
+                'dashboard_name': dashboard_name,
+                'role_id': {'$in': user_roles},
+                'guild_id': guild_id
+            })
+            return bool(role_perm)
+
+        except Exception as e:
+            print(f"Error checking dashboard permission: {str(e)}")
+            return False
+
+    async def check_command_permission(self, command_name: str, user: discord.Member, guild_id: int) -> bool:
+        """Check if user has permission to use a command"""
+        try:
+            user_id = user.id
+            user_roles = [role.id for role in user.roles]
+
+            # Check if user is bot owner
+            if str(user_id) == os.getenv('BOT_OWNER_ID'):
+                return True
+
+            # Check administrator permission
+            if user.guild_permissions.administrator:
+                return True
+
+            # Get command permissions
+            permissions = await self.db.command_permissions.find_one({
+                'command_name': command_name,
+                'guild_id': guild_id
+            })
+
+            # If no permissions set, allow access (default allow)
+            if not permissions:
+                return True
+
+            # Check user direct permission
+            user_perm = await self.db.command_permissions.find_one({
+                'command_name': command_name,
+                'user_id': user_id,
+                'guild_id': guild_id
+            })
+            if user_perm:
+                return True
+
+            # Check role permissions
+            role_perm = await self.db.command_permissions.find_one({
+                'command_name': command_name,
+                'role_id': {'$in': user_roles},
+                'guild_id': guild_id
+            })
+            return bool(role_perm)
+
+        except Exception as e:
+            print(f"Error checking command permission: {str(e)}")
+            return False
+
+    async def get_clan_data(self, guild_id: int) -> List[Dict]:
+        """Get all clan data for a guild"""
+        try:
+            cursor = self.db.clans.find({"guild_id": guild_id})
+            return await cursor.to_list(None)
+        except Exception as e:
+            print(f"Error getting clan data: {str(e)}")
+            return []
+
+    async def save_ticket(self, ticket_type: str, ticket_data: Dict[str, Any]) -> bool:
+        """Save a new ticket"""
+        try:
+            ticket_data['created_at'] = datetime.utcnow()
+            ticket_data['ticket_type'] = ticket_type
+            await self.db.tickets.insert_one(ticket_data)
+            return True
+        except Exception as e:
+            print(f"Error saving ticket: {str(e)}")
+            return False
+
+    async def get_ticket_staff(self, ticket_type: str) -> List[Dict]:
+        """Get staff for a ticket type"""
+        try:
+            cursor = self.db.ticket_staff.find({'ticket_type': ticket_type})
+            return await cursor.to_list(None)
+        except Exception as e:
+            print(f"Error getting ticket staff: {str(e)}")
+            return []
+
+    async def get_ticket_config(self, ticket_type: str, guild_id: int) -> Optional[Dict]:
+        """Get ticket configuration"""
+        try:
+            return await self.db.ticket_config.find_one({
+                'ticket_type': ticket_type,
+                'guild_id': guild_id
+            })
+        except Exception as e:
+            print(f"Error getting ticket config: {str(e)}")
+            return None
+
+    # Counting System Methods
+    async def setup_counting(self, channel_id: int, guild_id: int, current_count: int = 0) -> bool:
+        """Setup a counting channel"""
+        try:
+            await self.db.counting_channels.update_one(
+                {'channel_id': channel_id},
+                {
+                    '$set': {
+                        'guild_id': guild_id,
+                        'current_count': current_count,
+                        'last_counter': None,
+                        'enabled': True,
+                        'updated_at': datetime.utcnow()
+                    }
+                },
+                upsert=True
+            )
+            return True
+        except Exception as e:
+            print(f"Error setting up counting channel: {str(e)}")
+            return False
+
+    async def disable_counting(self, channel_id: int) -> bool:
+        """Disable counting in a channel"""
+        try:
+            result = await self.db.counting_channels.update_one(
+                {'channel_id': channel_id},
+                {
+                    '$set': {
+                        'enabled': False,
+                        'updated_at': datetime.utcnow()
+                    }
+                }
+            )
+            return result.modified_count > 0
+        except Exception as e:
+            print(f"Error disabling counting channel: {str(e)}")
+            return False
+
+    async def get_counting_data(self, channel_id: int) -> Optional[Dict]:
+        """Get counting channel data"""
+        try:
+            return await self.db.counting_channels.find_one({'channel_id': channel_id})
+        except Exception as e:
+            print(f"Error getting counting data: {str(e)}")
+            return None
+
+    async def update_count(self, channel_id: int, new_count: int, user_id: int) -> bool:
+        """Update the current count and last counter"""
+        try:
+            result = await self.db.counting_channels.update_one(
+                {'channel_id': channel_id, 'enabled': True},
+                {
+                    '$set': {
+                        'current_count': new_count,
+                        'last_counter': user_id,
+                        'updated_at': datetime.utcnow()
+                    }
+                }
+            )
+            return result.modified_count > 0
+        except Exception as e:
+            print(f"Error updating count: {str(e)}")
+            return False
+
+    async def get_guild_counting_channels(self, guild_id: int) -> List[Dict]:
+        """Get all counting channels for a guild"""
+        try:
+            cursor = self.db.counting_channels.find({
+                'guild_id': guild_id,
+                'enabled': True
+            })
+            return await cursor.to_list(None)
+        except Exception as e:
+            print(f"Error getting guild counting channels: {str(e)}")
+            return []
+
+    async def is_counting_channel(self, channel_id: int, guild_id: int) -> bool:
+        """Quickly check if a channel is a counting channel"""
+        try:
+            count = await self.db.counting_channels.count_documents({
+                'channel_id': channel_id,
+                'guild_id': guild_id,
+                'enabled': True
+            })
+            return count > 0
+        except Exception as e:
+            print(f"Error checking counting channel: {str(e)}")
+            return False
+
+    async def get_counting_settings(self, guild_id: int) -> Dict:
+        """Get guild counting settings"""
+        try:
+            settings = await self.db.guild_settings.find_one({
+                'guild_id': guild_id,
+                'type': 'counting'
+            })
+            if not settings:
+                # Default settings
+                settings = {
+                    'guild_id': guild_id,
+                    'type': 'counting',
+                    'fail_reactions': ['❌'],
+                    'success_reactions': ['✅'],
+                    'milestone_reactions': ['🎉', '🎊', '🥳'],
+                    'milestones': [100, 500, 1000, 5000, 10000],
+                    'allow_double_counting': False,
+                    'reset_on_wrong': True,
+                    'enabled': True,
+                    'created_at': datetime.utcnow()
+                }
+                await self.db.guild_settings.insert_one(settings)
+            return settings
+        except Exception as e:
+            print(f"Error getting counting settings: {str(e)}")
+            return {}
+
+    async def update_counting_settings(self, guild_id: int, settings: Dict) -> bool:
+        """Update guild counting settings"""
+        try:
+            result = await self.db.guild_settings.update_one(
+                {
+                    'guild_id': guild_id,
+                    'type': 'counting'
+                },
+                {
+                    '$set': {
+                        **settings,
+                        'updated_at': datetime.utcnow()
+                    }
+                },
+                upsert=True
+            )
+            return True
+        except Exception as e:
+            print(f"Error updating counting settings: {str(e)}")
+            return False
+
+    async def reset_count(self, channel_id: int) -> bool:
+        """Reset the count to 0"""
+        try:
+            result = await self.db.counting_channels.update_one(
+                {'channel_id': channel_id},
+                {
+                    '$set': {
+                        'current_count': 0,
+                        'last_counter': None,
+                        'updated_at': datetime.utcnow()
+                    }
+                }
+            )
+            return result.modified_count > 0
+        except Exception as e:
+            print(f"Error resetting count: {str(e)}")
+            return False

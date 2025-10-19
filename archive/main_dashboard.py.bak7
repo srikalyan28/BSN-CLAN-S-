@@ -1,0 +1,169 @@
+# -*- coding: ascii -*-
+import discord
+from discord.ext import commands
+from discord import app_commands
+import asyncio
+from datetime import datetime
+from typing import List, Optional, Dict
+import math
+from .views.staff_management import StaffManagementView
+from .views.category_selection import CategorySelectionView
+
+class MainDashboard(commands.Cog):
+    """Main dashboard cog for managing tickets and panels in Blackspire Nation"""
+    
+    def __init__(self, bot):
+        self.bot = bot
+        self.mongo = bot.mongo_manager
+        self.data_manager = bot.data_manager
+        self.ticket_categories = {
+            "main_panel": [
+                "join_clan", "apply_clan", "staff_application", 
+                "partnership_application", "esports_application", "giveaway_claim"
+            ],
+            "individual_panel": [
+                "sponsorship", "host_giveaway", "help_support"
+            ]
+        }
+
+    @app_commands.command(
+        name="main_dashboard",
+        description="[Ticket] Ticket Management Hub - Control all ticketing systems"
+    )
+    async def main_dashboard(self, interaction: discord.Interaction):
+        # Check permissions
+        user_roles = [role.id for role in interaction.user.roles]
+        has_permission = await self.mongo.check_dashboard_permission(
+            dashboard_name="main_dashboard",
+            user_id=interaction.user.id,
+            user_roles=user_roles,
+            guild_id=interaction.guild_id
+        )
+
+        if not has_permission:
+            embed = discord.Embed(
+                title="[X] Access Denied",
+                description="You don't have permission to access this dashboard.",
+                color=0xff0000
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        # Create the main dashboard embed
+        embed = discord.Embed(
+            title="[Ticket] BLACKSPIRE NATION - Main Dashboard",
+            description="**Ticket Management Hub**\n\nManage all ticketing systems for the server:",
+            color=0x00ff00
+        )
+        embed.set_footer(
+            text="Blackspire Nation Ticket Control",
+            icon_url=self.bot.user.avatar.url if self.bot.user.avatar else None
+        )
+        embed.set_thumbnail(
+            url=interaction.guild.icon.url if interaction.guild.icon else None
+        )
+
+        # Create the view with buttons
+        view = MainDashboardView(self.bot, self.ticket_categories)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+class MainDashboardView(discord.ui.View):
+    """Main dashboard view for ticket management"""
+    
+    def __init__(self, bot, ticket_categories):
+        super().__init__(timeout=300)
+        self.bot = bot
+        self.mongo = bot.mongo_manager
+        self.ticket_categories = ticket_categories
+
+    @discord.ui.button(
+        label="Main Panel",
+        style=discord.ButtonStyle.primary,
+        custom_id="main_panel"
+    )
+    async def main_panel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="[Menu] Main Panel Configuration",
+            description="Select ticket type to configure:",
+            color=0x3498db
+        )
+        
+        options = []
+        for ticket_type in self.ticket_categories["main_panel"]:
+            options.append(
+                discord.SelectOption(
+                    label=ticket_type.replace("_", " ").title(),
+                    value=ticket_type
+                )
+            )
+            
+        select_menu = discord.ui.Select(
+            placeholder="Choose a ticket type",
+            options=options,
+            custom_id="main_panel_select"
+        )
+        
+        view = discord.ui.View(timeout=300)
+        view.add_item(select_menu)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+    @discord.ui.button(
+        label="Individual Panels",
+        style=discord.ButtonStyle.primary,
+        custom_id="individual_panels"
+    )
+    async def individual_panels_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="[Menu] Individual Panel Configuration",
+            description="Select ticket type to configure:",
+            color=0x9b59b6
+        )
+        
+        options = []
+        for ticket_type in self.ticket_categories["individual_panel"]:
+            options.append(
+                discord.SelectOption(
+                    label=ticket_type.replace("_", " ").title(),
+                    value=ticket_type
+                )
+            )
+            
+        select_menu = discord.ui.Select(
+            placeholder="Choose a ticket type",
+            options=options,
+            custom_id="individual_panel_select"
+        )
+        
+        view = discord.ui.View(timeout=300)
+        view.add_item(select_menu)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+    @discord.ui.button(
+        label="Deploy Panels",
+        style=discord.ButtonStyle.success,
+        custom_id="deploy_panels"
+    )
+    async def deploy_panels_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="[Deploy] Deploy Ticket Panels",
+            description="Select panel type to deploy:",
+            color=0x2ecc71
+        )
+
+        options = [
+            discord.SelectOption(label="Main Panel", value="main_panel"),
+            discord.SelectOption(label="Individual Panels", value="individual_panel")
+        ]
+        
+        select_menu = discord.ui.Select(
+            placeholder="Choose panel type",
+            options=options,
+            custom_id="deploy_panel_select"
+        )
+        
+        view = discord.ui.View(timeout=300)
+        view.add_item(select_menu)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+async def setup(bot):
+    await bot.add_cog(MainDashboard(bot))

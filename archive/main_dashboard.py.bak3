@@ -1,0 +1,130 @@
+import discord
+from discord.ext import commands
+from discord import app_commands
+import asyncio
+from datetime import datetime
+from typing import List, Optional, Dict
+import math
+from .views.staff_management import StaffManagementView
+from .views.category_selection import CategorySelectionView, PreviousPageButton, NextPageButton
+
+
+class MainDashboard(commands.Cog):
+    """Main dashboard cog for managing tickets and panels"""
+    
+    TICKET_TYPES = [
+        "clan_apply", "clan_join", "esports_apply", "help_support",
+        "giveaway_host", "giveaway_claim", "partnership_apply", "staff_apply"
+    ]
+    
+    def __init__(self, bot):
+        self.bot = bot
+        self.mongo = bot.mongo_manager
+        self.data_manager = bot.data_manager
+
+    @app_commands.command(name="manage_ticket_staff", description="Add/remove staff for ticket handling")
+    @app_commands.describe(
+        action="Choose whether to add or remove staff",
+        ticket_type="The type of ticket to manage staff for",
+        user="The user to add/remove as staff (optional)",
+        role="The role to add/remove as staff (optional)"
+    )
+    @app_commands.choices(
+        action=[
+            app_commands.Choice(name="Add", value="add"),
+            app_commands.Choice(name="Remove", value="remove")
+        ],
+        ticket_type=[
+            app_commands.Choice(name=t.replace("_", " ").title(), value=t)
+            for t in TICKET_TYPES
+        ]
+    )
+    async def manage_ticket_staff(
+        self,
+        interaction: discord.Interaction,
+        action: str,
+        ticket_type: str,
+        user: discord.Member = None,
+        role: discord.Role = None
+    ):
+        if not user and not role:
+            await interaction.response.send_message(
+                "❌ You must mention either a user or a role!",
+                ephemeral=True
+            )
+            return
+
+        # Check permissions
+        user_roles = [r.id for r in interaction.user.roles]
+        has_permission = await self.mongo.check_dashboard_permission(
+            dashboard_name="main_dashboard",
+            user_id=interaction.user.id,
+            user_roles=user_roles,
+            guild_id=interaction.guild_id
+        )
+
+        if not has_permission:
+            await interaction.response.send_message(
+                "❌ You don't have permission to manage ticket staff!",
+                ephemeral=True
+            )
+            return
+
+        success = False
+        if action == "add":
+            if user:
+                success = await self.mongo.add_ticket_staff(ticket_type, interaction.guild_id, user_id=user.id)
+            if role:
+                success = await self.mongo.add_ticket_staff(ticket_type, interaction.guild_id, role_id=role.id)
+        else:  # remove
+            if user:
+                success = await self.mongo.remove_ticket_staff(ticket_type, interaction.guild_id, user_id=user.id)
+            if role:
+                success = await self.mongo.remove_ticket_staff(ticket_type, interaction.guild_id, role_id=role.id)
+
+        # Get current staff list
+        staff = await self.mongo.get_ticket_staff(ticket_type, interaction.guild_id)
+        
+        embed = discord.Embed(
+            title=f"🎫 Ticket Staff Management - {ticket_type.replace('_', ' ').title()}",
+            color=0x00ff00 if success else 0xff0000
+        )
+        
+        status = "added to" if action == "add" else "removed from"
+        target = f"User {user.mention}" if user else f"Role {role.mention}"
+        
+        if success:
+            embed.description = f"✅ {target} successfully {status} ticket staff!"
+        else:
+            embed.description = f"❌ Failed to {action} {target.lower()} to ticket staff!"
+        
+        # Add current staff list to embed
+        staff_list = []
+        for user_id in staff['users']:
+            member = interaction.guild.get_member(user_id)
+            if member:
+                staff_list.append(f"👤 {member.mention}")
+                
+        for role_id in staff['roles']:
+            role = interaction.guild.get_role(role_id)
+            if role:
+                staff_list.append(f"👥 {role.mention}")
+                
+        if staff_list:
+            embed.add_field(
+                name="Current Staff",
+                value="\n".join(staff_list),
+                inline=False
+            )
+        else:
+            embed.add_field(
+                name="Current Staff",
+                value="No staff members or roles set",
+                inline=False
+            )
+
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+async def setup(bot):
+    await bot.add_cog(MainDashboard(bot))
